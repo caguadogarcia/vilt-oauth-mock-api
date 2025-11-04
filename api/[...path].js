@@ -2,18 +2,18 @@
 import app from "../server.js";
 
 export default function handler(req, res) {
-  // Vercel provides the dynamic segments here:
-  //   /api/health            -> req.query.path === ['health']
-  //   /api/admin/reset       -> req.query.path === ['admin', 'reset']
-  //   /api/token?runId=123   -> req.query.path === ['token']
+  // Rebuild proper Express URL from dynamic segments
+  let path = "/";
   const segs = req.query?.path;
-  const path = Array.isArray(segs) ? `/${segs.join("/")}` : `/${segs || ""}`;
+  if (Array.isArray(segs) && segs.length > 0) {
+    path = "/" + segs.join("/");
+  }
 
-  // Preserve the original query string (if any)
+  // Preserve any query string (?runId=xxx)
   const qsIndex = req.url.indexOf("?");
   const qs = qsIndex >= 0 ? req.url.slice(qsIndex) : "";
 
-  // Make Express see exactly "/health", "/admin/reset", "/token", etc.
+  // Final URL Express should see
   req.url = path + qs;
 
   return app(req, res);
