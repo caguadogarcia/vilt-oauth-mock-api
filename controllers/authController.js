@@ -47,9 +47,6 @@ exports.issueToken = async (req, res) => {
       }
       const notExpired = !!(doc?.currentToken && expiresMs > now);
 
-      const expiresMs = doc?.tokenExpiresAt ? new Date(doc.tokenExpiresAt).getTime() : 0;
-      const notExpired = doc?.currentToken && now < expiresMs;
-
       if (notExpired) {
         const remaining = Math.max(1, Math.floor((expiresMs - now) / 1000));
         return res.status(200).json({
