@@ -39,6 +39,13 @@ exports.issueToken = async (req, res) => {
         },
         { upsert: true }
       );
+	        
+	  // Reuse if not expired (robust date parsing)
+      let expiresMs = 0;
+      if (doc && typeof doc.tokenExpiresAt === "string") {
+        expiresMs = Date.parse(doc.tokenExpiresAt);
+      }
+      const notExpired = !!(doc?.currentToken && expiresMs > now);
 
       const expiresMs = doc?.tokenExpiresAt ? new Date(doc.tokenExpiresAt).getTime() : 0;
       const notExpired = doc?.currentToken && now < expiresMs;
@@ -51,11 +58,29 @@ exports.issueToken = async (req, res) => {
           expires_in: remaining
         });
       }
+	  
+	  // Safe check 
+      const latest = await coll.findOne(
+        { runId },
+        { projection: { currentToken: 1, tokenExpiresAt: 1, nextTokenTtlSeconds: 1 } }
+      );
 
-      // Determine TTL to use for the new token
-      const ttlSec = Number.isFinite(doc?.nextTokenTtlSeconds) && doc.nextTokenTtlSeconds > 0
-        ? doc.nextTokenTtlSeconds
-        : 120;
+      if (latest?.currentToken && typeof latest.tokenExpiresAt === "string") {
+        const expLatest = Date.parse(latest.tokenExpiresAt);
+        if (expLatest > now) {
+          const remaining = Math.max(1, Math.floor((expLatest - now) / 1000));
+          return res.status(200).json({
+            access_token: latest.currentToken,
+            token_type: "Bearer",
+            expires_in: remaining
+          });
+        }
+      }
+
+      // Determine TTL to use for the new token (prefer latest if present)
+      const ttlCandidate = latest?.nextTokenTtlSeconds ?? doc?.nextTokenTtlSeconds;
+      const ttlSec =
+        Number.isFinite(ttlCandidate) && ttlCandidate > 0 ? ttlCandidate : 120;
 
       const newToken = crypto.randomBytes(32).toString("base64url");
       const expMs = now + ttlSec * 1000;
