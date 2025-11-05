@@ -1,33 +1,24 @@
-// controllers/adminController.js
-import { getDb } from "../common/db.js";
+// controllers/adminController.js (CommonJS)
+const { getDb } = require("../common/db");
 
-export async function reset(req, res) {
-  const runId = req.query.runId;
-  if (!runId) {
-    return res.status(400).json({ error: "runId is required" });
-  }
+exports.reset = async (req, res) => {
+  const runId = req.query.runId || req.body?.runId;
+  if (!runId) return res.status(400).json({ error: "runId is required" });
 
   try {
+    if (!process.env.MONGODB_URI) {
+      return res.status(200).json({ message: "MongoDB not configured; nothing to reset.", runId });
+    }
+
     const db = await getDb();
-    const runs = db.collection("runs");
+    const result = await db.collection("runs").deleteOne({ runId });
 
-    const freshDoc = {
-      runId,
-      tokenHits: 0,
-      issuedTokens: [],
-      seenBearerTokens: [],
-      perEndpointUsage: {
-        createsession: 0,
-        updatesession: 0,
-        cancelsession: 0
-      },
-      nextTokenTtlSeconds: 120
-    };
-
-    await runs.updateOne({ runId }, { $set: freshDoc }, { upsert: true });
-
-    res.status(200).json({ message: "reset ok", runId });
+    res.status(200).json({
+      message: result.deletedCount > 0 ? "reset ok" : "no data to reset",
+      runId
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message || err.toString() });
+    console.error("Reset failed:", err.message);
+    res.status(500).json({ error: "Reset failed", details: err.message });
   }
-}
+};
