@@ -79,3 +79,60 @@ exports.config = async (req, res) => {
     res.status(500).json({ error: "Config failed", details: err.message });
   }
 };
+
+// Tokens issued
+exports.tokens = async (req, res) => {
+  const runId = req.query.runId || req.body?.runId;
+  if (!runId) return res.status(400).json({ error: "runId is required" });
+
+  try {
+    const db = await getDb();
+    const coll = db.collection("runs");
+
+    const doc = await coll.findOne(
+      { runId },
+      {
+        projection: {
+          runId: 1,
+          issuedTokens: 1,
+          currentToken: 1,
+          tokenExpiresAt: 1,
+          tokenRotations: 1,
+          tokenHits: 1
+        }
+      }
+    );
+
+    if (!doc) {
+      return res.status(200).json({
+        runId,
+        tokenHits: 0,
+        tokenRotations: 0,
+        currentToken: null,
+        tokenExpiresAt: null,
+        count: 0,
+        issuedTokens: []
+      });
+    }
+
+    const tokens = (doc.issuedTokens || []).map((t, i) => ({
+      index: i + 1,
+      token: t.token,
+      issuedAt: t.issuedAt,
+      expiresAt: t.expiresAt,
+      isCurrent: doc.currentToken === t.token
+    }));
+
+    return res.status(200).json({
+      runId: doc.runId,
+      tokenHits: doc.tokenHits || 0,
+      tokenRotations: doc.tokenRotations || 0,
+      currentToken: doc.currentToken || null,
+      tokenExpiresAt: doc.tokenExpiresAt || null,
+      count: tokens.length,
+      issuedTokens: tokens
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+};

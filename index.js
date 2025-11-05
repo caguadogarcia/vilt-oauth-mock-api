@@ -22,6 +22,7 @@ app.post("/token", issueToken);
 app.post("/admin/reset", admin.reset);
 app.get("/admin/metrics", admin.metrics);
 app.post("/admin/config", admin.config);
+app.get("/admin/tokens", admin.tokens);
 
 // Dev server only (Vercel imports the app instead)
 if (process.env.VERCEL !== "1") {
