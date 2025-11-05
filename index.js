@@ -5,6 +5,7 @@ const bodyParser = require("body-parser");
 
 const { issueToken } = require("./controllers/authController");
 const admin = require("./controllers/adminController");
+const protectedController = require("./controllers/protectedController");
 
 const app = express();
 
@@ -23,6 +24,10 @@ app.post("/admin/reset", admin.reset);
 app.get("/admin/metrics", admin.metrics);
 app.post("/admin/config", admin.config);
 app.get("/admin/tokens", admin.tokens);
+
+app.get("/api/createsession", protectedController.createSession);
+app.get("/api/updatesession", protectedController.updateSession);
+app.post("/api/cancelsession", protectedController.cancelSession);
 
 // Dev server only (Vercel imports the app instead)
 if (process.env.VERCEL !== "1") {
