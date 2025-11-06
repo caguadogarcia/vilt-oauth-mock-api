@@ -1,15 +1,15 @@
 // controllers/protectedController.js
 const { getDb } = require("../common/db");
 
-//Helper to validate the Authorization Bearer token for a given runId.
+// Helper: validate Authorization: Bearer <token> for a given runId.
 async function validateBearerToken(req, res) {
   const auth = req.headers["authorization"];
   const runId = req.query.runId || req.body?.runId;
+
   if (!runId) {
     res.status(400).json({ error: "runId is required" });
     return null;
   }
-
   if (!auth || !auth.startsWith("Bearer ")) {
     res.status(401).json({ error: "missing_authorization" });
     return null;
@@ -29,52 +29,11 @@ async function validateBearerToken(req, res) {
 
     const now = Date.now();
     const exp = new Date(doc.tokenExpiresAt).getTime();
-    if (now > exp) {
+
+    if (Number.isFinite(exp) && now > exp) {
       res.status(401).json({ error: "token_expired" });
       return null;
     }
-
-    if (token !== doc.currentToken) {
-      res.status(401).json({ error: "invalid_token" });
-      return null;
-    }
-
-    // controllers/protectedController.js
-const { getDb } = require("../common/db");
-
-//Helper to validate the Authorization Bearer token for a given runId.
-async function validateBearerToken(req, res) {
-  const auth = req.headers["authorization"];
-  const runId = req.query.runId || req.body?.runId;
-  if (!runId) {
-    res.status(400).json({ error: "runId is required" });
-    return null;
-  }
-
-  if (!auth || !auth.startsWith("Bearer ")) {
-    res.status(401).json({ error: "missing_authorization" });
-    return null;
-  }
-
-  const token = auth.slice("Bearer ".length).trim();
-
-  try {
-    const db = await getDb();
-    const coll = db.collection("runs");
-    const doc = await coll.findOne({ runId });
-
-    if (!doc || !doc.currentToken) {
-      res.status(401).json({ error: "no_token_issued" });
-      return null;
-    }
-
-    const now = Date.now();
-    const exp = new Date(doc.tokenExpiresAt).getTime();
-    if (now > exp) {
-      res.status(401).json({ error: "token_expired" });
-      return null;
-    }
-
     if (token !== doc.currentToken) {
       res.status(401).json({ error: "invalid_token" });
       return null;
@@ -88,17 +47,15 @@ async function validateBearerToken(req, res) {
   }
 }
 
-// Create Session: Requires Authorization: Bearer <token> and a valid runId.
- exports.createSession = async (req, res) => {
+// GET /api/createsession?runId=XXX   (requires Bearer token)
+exports.createSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
-  if (!ctx) return; // 401 already sent
+  if (!ctx) return;
 
   const { coll, runId } = ctx;
-
   const sessionId = `sess_${runId}_${Date.now().toString(36)}`;
   const nowIso = new Date().toISOString();
 
-  // Increment usage + persist minimal session info so update/cancel can find it
   await coll.updateOne(
     { runId },
     {
@@ -125,7 +82,7 @@ async function validateBearerToken(req, res) {
   });
 };
 
-// GET /api/updatesession?runId=XXX&sessionId=YYY
+// GET /api/updatesession?runId=XXX[&sessionId=YYY]
 exports.updateSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
   if (!ctx) return;
@@ -133,7 +90,6 @@ exports.updateSession = async (req, res) => {
   const { coll, runId } = ctx;
   const nowIso = new Date().toISOString();
 
-  // Use explicit ?sessionId=... if provided; else fallback to lastSessionId
   const runDoc = await coll.findOne({ runId }, { projection: { lastSessionId: 1 } });
   const sessionId = req.query.sessionId || runDoc?.lastSessionId;
 
@@ -141,7 +97,6 @@ exports.updateSession = async (req, res) => {
     return res.status(404).json({ error: "no_session_found_for_run" });
   }
 
-  // Update session record if present; always increment usage
   await coll.updateOne(
     { runId, "sessions.sessionId": sessionId },
     {
@@ -159,7 +114,7 @@ exports.updateSession = async (req, res) => {
   });
 };
 
-// POST /api/cancelsession?runId=XXX&sessionId=YYY
+// POST /api/cancelsession?runId=XXX[&sessionId=YYY]  (or body.sessionId)
 exports.cancelSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
   if (!ctx) return;
