@@ -17,16 +17,17 @@ app.use(bodyParser.json());
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // OAuth Mock
-app.post("/token", issueToken);
+app.post("/oauth/token", issueToken);
 
-// Helpers
+// Admin / Monitoring
 app.post("/admin/reset", admin.reset);
 app.get("/admin/metrics", admin.metrics);
 app.post("/admin/config", admin.config);
 app.get("/admin/tokens", admin.tokens);
 
-app.get("/api/createsession", protectedController.createSession);
-app.get("/api/updatesession", protectedController.updateSession);
+// Functional (require Bearer token) — all POST with JSON bodies
+app.post("/api/createsession", protectedController.createSession);
+app.post("/api/updatesession", protectedController.updateSession);
 app.post("/api/cancelsession", protectedController.cancelSession);
 
 // Dev server only (Vercel imports the app instead)

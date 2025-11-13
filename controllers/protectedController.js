@@ -1,147 +1,189 @@
 // controllers/protectedController.js
 const { getDb } = require("../common/db");
+const crypto = require("crypto");
 
-// Helper: validate Authorization: Bearer <token> for a given runId.
+// ---------- helpers ----------
+function nowIso() { return new Date().toISOString(); }
+function uuid() { return crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2); }
+
+function ok(status = "success") {
+  return { status, correlationId: uuid(), timestamp: nowIso() };
+}
+function err(code = 0, message = "error") {
+  return { status: "error", correlationId: uuid(), timestamp: nowIso(), error: { code, message } };
+}
+
+async function findClientByToken(coll, token) {
+  if (!token) return null;
+  let doc = await coll.findOne({ currentToken: token });
+  if (doc) return doc;
+  // fallback: if someone sends an old token, we still find the doc to report invalid/expired accurately
+  doc = await coll.findOne({ "issuedTokens.token": token });
+  return doc;
+}
+
+/**
+ * Validate Authorization: Bearer <token>
+ * Finds a client whose currentToken matches and is not expired.
+ * Returns { db, coll, client } or writes an HTTP error and returns null.
+ */
 async function validateBearerToken(req, res) {
   const auth = req.headers["authorization"];
-  const runId = req.query.runId || req.body?.runId;
-
-  if (!runId) {
-    res.status(400).json({ error: "runId is required" });
-    return null;
-  }
   if (!auth || !auth.startsWith("Bearer ")) {
-    res.status(401).json({ error: "missing_authorization" });
+    res.status(401).json(err(40101, "missing_authorization"));
     return null;
   }
-
   const token = auth.slice("Bearer ".length).trim();
 
   try {
     const db = await getDb();
-    const coll = db.collection("runs");
-    const doc = await coll.findOne({ runId });
+    const coll = db.collection("clients");
+    const client = await findClientByToken(coll, token);
 
-    if (!doc || !doc.currentToken) {
-      res.status(401).json({ error: "no_token_issued" });
+    if (!client || !client.currentToken) {
+      res.status(401).json(err(40102, "invalid_token"));
       return null;
     }
 
-    const now = Date.now();
-    const exp = new Date(doc.tokenExpiresAt).getTime();
-
-    if (Number.isFinite(exp) && now > exp) {
-      res.status(401).json({ error: "token_expired" });
-      return null;
-    }
-    if (token !== doc.currentToken) {
-      res.status(401).json({ error: "invalid_token" });
+    const expMs = client.tokenExpiresAt ? Date.parse(client.tokenExpiresAt) : 0;
+    if (!Number.isFinite(expMs) || Date.now() > expMs) {
+      res.status(401).json(err(40103, "token_expired"));
       return null;
     }
 
-    return { ok: true, doc, db, coll, runId };
-  } catch (err) {
-    console.error("validateBearerToken failed:", err.message);
-    res.status(500).json({ error: "internal_validation_error" });
+    if (token !== client.currentToken) {
+      // Old/rotated token
+      res.status(401).json(err(40104, "invalid_token"));
+      return null;
+    }
+
+    return { db, coll, client };
+  } catch (e) {
+    console.error("validateBearerToken failed:", e);
+    res.status(500).json(err(50001, "internal_validation_error"));
     return null;
   }
 }
 
-// GET /api/createsession?runId=XXX   (requires Bearer token)
+// ---------- endpoints ----------
+
+/**
+ * POST /api/createsession
+ * Body = your full CreateSession payload. SessionId optional; generated if missing.
+ * 200: { status, correlationId, timestamp }
+ */
 exports.createSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
   if (!ctx) return;
+  const { coll, client } = ctx;
 
-  const { coll, runId } = ctx;
-  const sessionId = `sess_${runId}_${Date.now().toString(36)}`;
-  const nowIso = new Date().toISOString();
+  const body = req.body || {};
+  const sessionId =
+    (body.SessionId && String(body.SessionId).trim()) ||
+    `sess_${client.clientId}_${Date.now().toString(36)}`;
 
-  await coll.updateOne(
-    { runId },
-    {
-      $inc: { "perEndpointUsage.createsession": 1 },
-      $set: { lastSessionId: sessionId },
-      $push: {
-        sessions: {
-          sessionId,
-          status: "active",
-          createdAt: nowIso,
-          updatedAt: nowIso
+  try {
+    await coll.updateOne(
+      { clientId: client.clientId, clientSecret: client.clientSecret },
+      {
+        $inc: { "perEndpointUsage.createsession": 1 },
+        $set: { lastSessionId: sessionId },
+        $push: {
+          sessions: {
+            sessionId,
+            status: "active",
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+            request: body
+          }
         }
-      }
-    },
-    { upsert: true }
-  );
+      },
+      { upsert: true }
+    );
 
-  res.status(200).json({
-    status: "ok",
-    endpoint: "createsession",
-    runId,
-    sessionId,
-    createdAt: nowIso
-  });
+    res.status(200).json(ok("success"));
+  } catch (e) {
+    console.error("createSession failed:", e);
+    res.status(500).json(err(50010, "create_session_failed"));
+  }
 };
 
-// GET /api/updatesession?runId=XXX[&sessionId=YYY]
+/**
+ * POST /api/updatesession
+ * Body must include { SessionId, ... } (can reuse same shape as create).
+ * 200: { status, correlationId, timestamp }
+ */
 exports.updateSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
   if (!ctx) return;
+  const { coll, client } = ctx;
 
-  const { coll, runId } = ctx;
-  const nowIso = new Date().toISOString();
-
-  const runDoc = await coll.findOne({ runId }, { projection: { lastSessionId: 1 } });
-  const sessionId = req.query.sessionId || runDoc?.lastSessionId;
-
+  const body = req.body || {};
+  const sessionId = body.SessionId && String(body.SessionId).trim();
   if (!sessionId) {
-    return res.status(404).json({ error: "no_session_found_for_run" });
+    return res.status(400).json(err(40010, "SessionId is required"));
   }
 
-  await coll.updateOne(
-    { runId, "sessions.sessionId": sessionId },
-    {
-      $set: { "sessions.$.updatedAt": nowIso, "sessions.$.status": "updated" },
-      $inc: { "perEndpointUsage.updatesession": 1 }
-    }
-  );
+  try {
+    const result = await coll.updateOne(
+      { clientId: client.clientId, clientSecret: client.clientSecret, "sessions.sessionId": sessionId },
+      {
+        $set: {
+          "sessions.$.status": "updated",
+          "sessions.$.updatedAt": nowIso(),
+          "sessions.$.lastUpdateRequest": body
+        },
+        $inc: { "perEndpointUsage.updatesession": 1 }
+      }
+    );
 
-  res.status(200).json({
-    status: "ok",
-    endpoint: "updatesession",
-    runId,
-    sessionId,
-    updatedAt: nowIso
-  });
+    if (result.matchedCount === 0) {
+      return res.status(404).json(err(40410, "session_not_found"));
+    }
+
+    res.status(200).json(ok("success"));
+  } catch (e) {
+    console.error("updateSession failed:", e);
+    res.status(500).json(err(50011, "update_session_failed"));
+  }
 };
 
-// POST /api/cancelsession?runId=XXX[&sessionId=YYY]  (or body.sessionId)
+/**
+ * POST /api/cancelsession
+ * Body must include { SessionId }.
+ * 200: { status, correlationId, timestamp }
+ */
 exports.cancelSession = async (req, res) => {
   const ctx = await validateBearerToken(req, res);
   if (!ctx) return;
+  const { coll, client } = ctx;
 
-  const { coll, runId } = ctx;
-  const nowIso = new Date().toISOString();
-
-  const runDoc = await coll.findOne({ runId }, { projection: { lastSessionId: 1 } });
-  const sessionId = req.query.sessionId || req.body?.sessionId || runDoc?.lastSessionId;
-
+  const body = req.body || {};
+  const sessionId = body.SessionId && String(body.SessionId).trim();
   if (!sessionId) {
-    return res.status(404).json({ error: "no_session_found_for_run" });
+    return res.status(400).json(err(40020, "SessionId is required"));
   }
 
-  await coll.updateOne(
-    { runId, "sessions.sessionId": sessionId },
-    {
-      $set: { "sessions.$.updatedAt": nowIso, "sessions.$.status": "canceled" },
-      $inc: { "perEndpointUsage.cancelsession": 1 }
-    }
-  );
+  try {
+    const result = await coll.updateOne(
+      { clientId: client.clientId, clientSecret: client.clientSecret, "sessions.sessionId": sessionId },
+      {
+        $set: {
+          "sessions.$.status": "canceled",
+          "sessions.$.updatedAt": nowIso(),
+          "sessions.$.cancelRequest": body
+        },
+        $inc: { "perEndpointUsage.cancelsession": 1 }
+      }
+    );
 
-  res.status(200).json({
-    status: "ok",
-    endpoint: "cancelsession",
-    runId,
-    sessionId,
-    canceledAt: nowIso
-  });
+    if (result.matchedCount === 0) {
+      return res.status(404).json(err(40420, "session_not_found"));
+    }
+
+    res.status(200).json(ok("success"));
+  } catch (e) {
+    console.error("cancelSession failed:", e);
+    res.status(500).json(err(50012, "cancel_session_failed"));
+  }
 };
